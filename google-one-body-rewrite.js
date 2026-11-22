@@ -1,66 +1,70 @@
+/*
+ * Google One ID 扫描器 — 观察模式
+ *
+ * 作用：扫 one.google.com 所有解密后的响应体，把里面出现的 g1.* 令牌全部列出来，
+ *       用 iOS 通知推送给你。谁命中了、命中在哪个 URL、ID 长什么样，一次看清。
+ *
+ * 关键安全属性：全程 $done({}) —— 一个字节都不改。页面坏不了。
+ *
+ * 引擎：Shadowrocket  [Script] http-response + requires-body
+ */
+
 (function () {
+  var STORE_KEY = "g1scan_last_v1";
 
-  var DEBUG_BANNER = false;   // 排查时改 true
-  var PAIRS = [
-    ['g1.ios.30tb.ai.pro.m', 'g1.ai.ultra.3months_ip_90p.acq'],
-    ['g1.ios.20tb.m.v2',     'g1.20tb.3months_ip_90p.acq']
-  ];
+  // g1.xxx.yyy.zzz 形式，允许下划线和数字，长度放宽
+  var RE_ID = /\bg1\.[a-z0-9_]{1,24}(?:\.[a-z0-9_]{1,40}){1,6}\b/gi;
 
-  function bail(why) {
-    console.log('[G1] pass-through: ' + why);
-    try { $done({}); } catch (e) {}
+  function notify(title, subtitle, body) {
+    try {
+      $notification.post(
+        String(title).slice(0, 60),
+        String(subtitle).slice(0, 120),
+        String(body).slice(0, 300)
+      );
+    } catch (e) {}
+  }
+
+  function shortUrl(u) {
+    return String(u || "")
+      .replace(/^https:\/\/one\.google\.com/, "")
+      .replace(/[?&](f\.sid|bl|soc-app|soc-platform|soc-device|_reqid|rt|otzr|dm|hl)=[^&]*/g, "")
+      .replace(/\?$/, "");
   }
 
   try {
-    var res  = $response || {};
-    var url  = ($request && $request.url) || '';
-    var hdrs = res.headers || {};
-    var ct   = String(hdrs['Content-Type'] || hdrs['content-type'] || '').toLowerCase();
-    var body = res.body;
+    var url = ($request && $request.url) || "(no request)";
+    var body = ($response && $response.body) || "";
 
-    if (body === null || body === undefined) return bail('empty body');
-    if (typeof body !== 'string') body = String(body);
-    if (!body.length) return bail('zero length');
-
-    // 二进制/压缩残留：一个字都不要碰
-    if (/[\u0000-\u0008\u000e-\u001f]/.test(body.slice(0, 512))) return bail('binary body');
-
-    var orig = body;
-    var hits = 0;
-    for (var i = 0; i < PAIRS.length; i++) {
-      var parts = body.split(PAIRS[i][0]);
-      if (parts.length > 1) { hits += parts.length - 1; body = parts.join(PAIRS[i][1]); }
+    if (typeof body !== "string" || !body.length) {
+      $done({});
+      return;
     }
 
-    var injected = false;
-    if (DEBUG_BANNER) {
-      var isHtml = ct.indexOf('html') >= 0 || (/<html[\s>]/i.test(body) && /<\/body>/i.test(body));
-      if (isHtml) {
-        var ids = (orig.match(/g1\.[A-Za-z0-9_.-]{2,60}/g) || []);
-        var uniq = [], seen = {};
-        for (var j = 0; j < ids.length && uniq.length < 12; j++) {
-          if (!seen[ids[j]]) { seen[ids[j]] = 1; uniq.push(ids[j]); }
-        }
-        var bar = '<div style="position:fixed;left:0;right:0;top:0;z-index:2147483647;'
-          + 'background:#000;color:#0f0;font:11px/1.45 ui-monospace,Menlo,monospace;'
-          + 'padding:6px 8px;white-space:pre-wrap;word-break:break-all;opacity:.93">'
-          + 'G1PROBE len=' + orig.length + ' hits=' + hits + ' ids=' + ids.length
-          + '\nURL ' + url.replace(/[<>&]/g, function (c) { return { '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]; })
-          + '\nCT  ' + (ct || '(none)')
-          + '\n' + (uniq.length ? uniq.join('\n') : '(no g1.* id inside this document)')
-          + '</div>';
-        body = body.replace(/<\/body>/i, bar + '</body>');
-        injected = true;
+    var found = body.match(RE_ID) || [];
+    var uniq = [];
+    for (var i = 0; i < found.length; i++) {
+      var id = String(found[i]).toLowerCase();
+      if (uniq.indexOf(id) === -1) uniq.push(id);
+    }
+
+    if (uniq.length) {
+      var sig = shortUrl(url) + "|" + uniq.join(",");
+      var prev = "";
+      try { prev = $persistentStore.read(STORE_KEY) || ""; } catch (e) {}
+
+      if (sig !== prev) {
+        try { $persistentStore.write(sig, STORE_KEY); } catch (e) {}
+        notify(
+          "Google One 命中 " + uniq.length + " 个 ID",
+          shortUrl(url),
+          uniq.join("  ")
+        );
       }
     }
 
-    if (!hits && !injected) return bail('nothing to change');
-
-    console.log('[G1] ok url=' + url + ' hits=' + hits + ' banner=' + injected);
-    $done({ body: body });
-
+    $done({});
   } catch (e) {
-    bail('exception: ' + e);
+    $done({});
   }
-
 })();
